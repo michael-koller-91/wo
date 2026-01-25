@@ -66,30 +66,33 @@ main :: proc() {
 	fpat, fpat_err := regex.create(args.filename_pattern, {.No_Capture})
 	if fpat_err != nil {
 		fmt.eprintfln(
-			"ERROR: Failed to create regular expression from filename pattern \"%v\": %v",
+			"ERROR: Failed to create regular expression from filename pattern \"%v\": %v. Maybe escaping is missing?",
 			args.filename_pattern,
 			fpat_err,
 		)
+		os.exit(1)
 	}
 
 	do_ematch := args.exclude_pattern != ""
 	epat, epat_err := regex.create(args.exclude_pattern, {.No_Capture})
 	if epat_err != nil {
 		fmt.eprintfln(
-			"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v",
+			"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v. Maybe escaping is missing?",
 			args.exclude_pattern,
 			epat_err,
 		)
+		os.exit(1)
 	}
 
 	do_cmatch := args.content_pattern != ""
 	cpat, cpat_err := regex.create(args.content_pattern, {.No_Capture})
 	if cpat_err != nil {
 		fmt.eprintfln(
-			"ERROR: Failed to create regular expression from content pattern \"%v\": %v",
+			"ERROR: Failed to create regular expression from content pattern \"%v\": %v. Maybe escaping is missing?",
 			args.content_pattern,
 			cpat_err,
 		)
+		os.exit(1)
 	}
 
 	cwd, cwd_ok := os2.get_working_directory(context.allocator)
