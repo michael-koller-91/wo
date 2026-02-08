@@ -11,22 +11,22 @@ wo -h
 
 Find all files ending with `.py`:
 ```console
-wo ".*.py$"
+wo ".py$"
 ```
 
 Find all files ending with `.py` but exclude files in the folder `.venv`:
 ```console
-wo ".*.py$" -e:".venv"
+wo ".py$" -e:".venv"
 ```
 
 In all files ending with `.py` but excluding files in the folder `.venv`, find lines containing `def`:
 ```console
-wo ".*.py$" -e:".venv" -c:"def"
+wo ".py$" -e:".venv" -c:"def"
 ```
 
 In all files ending with `.py`, find lines containing `def`:
 ```console
-wo ".*.py$" -c:"def"
+wo ".py$" -c:"def"
 ```
 
 ## Installation
@@ -34,7 +34,7 @@ wo ".*.py$" -c:"def"
 
 Run
 ```console
-odin build .
+odin build . -o:speed
 ```
 to get the executable `wo`.
 

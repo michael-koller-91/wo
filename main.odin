@@ -7,19 +7,19 @@ import "core:os/os2"
 import "core:strings"
 import "core:text/regex"
 
-VERSION := "0.0.1"
+VERSION :: "0.0.1"
 
 write_examples :: proc() {
 	fmt.println("Examples:")
 
 	fmt.println("\tFind all Odin files")
-	fmt.println("\t\two \".*.odin$\"")
+	fmt.println("\t\two \".odin$\"")
 
 	fmt.println("\tFind all Odin files but don't search through .git")
-	fmt.println("\t\two \".*.odin$\" -e:\".git\"")
+	fmt.println("\t\two \".odin$\" -e:\".git\"")
 
 	fmt.println("\tFind all Odin files that contain 'gingerBill' (with word boundaries)")
-	fmt.println("\t\two \".*.odin$\" -c:\"\\bgingerBill\\b\"")
+	fmt.println("\t\two \".odin$\" -c:\"\\bgingerBill\\b\"")
 }
 
 main :: proc() {
