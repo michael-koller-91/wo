@@ -5,9 +5,17 @@ import "core:fmt"
 import "core:os"
 import "core:os/os2"
 import "core:strings"
+import "core:terminal/ansi"
 import "core:text/regex"
 
-VERSION :: "0.0.1"
+VERSION :: "0.0.2"
+// changelog
+// 0.0.2: colors for file path and line number
+
+BLUE :: ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR
+GREEN :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
+RED :: ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR
+RESET :: ansi.CSI + ansi.RESET + ansi.SGR
 
 write_examples :: proc() {
 	fmt.println("Examples:")
@@ -22,12 +30,29 @@ write_examples :: proc() {
 	fmt.println("\t\two \".odin$\" -c:\"\\bgingerBill\\b\"")
 }
 
+main2 :: proc() {
+	cpat, cpat_err := regex.create("def.*(foo)")
+	s1 := "def: foo"
+	s2 := " def: foo"
+	s3 := "foo def: bar"
+	s4 := "foo def: bar def"
+	s5 := "def def: bar def"
+	ss: []string = {s1, s2, s3, s4, s5}
+	for s in ss {
+		capture, cmatch := regex.match(cpat, s)
+		fmt.println(capture)
+		for pos in capture.pos {
+		}
+	}
+}
+
 main :: proc() {
 	// this is kind of a hack but I don't see how to handle this when a flag is marked required
 	if len(os.args) == 2 && os.args[1] == "-v" {
 		fmt.printfln("wo %v", VERSION)
 		os.exit(0)
 	}
+
 
 	Args :: struct {
 		filename_pattern: string `args:"pos=0,required" usage:"Filename pattern. Find every file whose name matches this pattern."`,
@@ -85,7 +110,7 @@ main :: proc() {
 	}
 
 	do_cmatch := args.content_pattern != ""
-	cpat, cpat_err := regex.create(args.content_pattern, {.No_Capture})
+	cpat, cpat_err := regex.create(args.content_pattern) //, {.No_Capture})
 	if cpat_err != nil {
 		fmt.eprintfln(
 			"ERROR: Failed to create regular expression from content pattern \"%v\": %v. Maybe escaping is missing?",
@@ -159,14 +184,19 @@ main :: proc() {
 					had_match = true
 					ccounter += 1
 					if !args.quiet {
-						fmt.printf("%v:%d : %v", filepath, linenr, str)
+						fmt.printf(
+							BLUE + "%v" + RESET + ":" + GREEN + "%v" + RESET + ": %v",
+							filepath,
+							linenr,
+							str,
+						)
 					}
 				}
 			}
 			if !args.quiet {
 				// an empty line between files if we print content matches
 				if had_match {
-					fmt.println()
+					//fmt.println()
 				}
 			}
 		} else {

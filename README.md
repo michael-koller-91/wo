@@ -34,7 +34,7 @@ wo ".py$" -c:"def"
 
 Run
 ```console
-odin build . -o:speed
+./build.sh
 ```
 to get the executable `wo`.
 
