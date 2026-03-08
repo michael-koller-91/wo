@@ -3,7 +3,6 @@ package main
 import "core:flags"
 import "core:fmt"
 import "core:os"
-import "core:os/os2"
 import "core:strings"
 import "core:terminal/ansi"
 import "core:text/regex"
@@ -65,7 +64,7 @@ main :: proc() {
 	parse_err := flags.parse(&args, os.args[1:])
 	switch e in parse_err {
 	case flags.Validation_Error:
-		flags.write_usage(os.stream_from_handle(os.stdout), Args, os.args[0])
+		flags.write_usage(os.to_stream(os.stdout), Args, os.args[0])
 		write_examples()
 		fmt.eprintfln("\n[%T] %s", e, e.message)
 		os.exit(1)
@@ -73,17 +72,9 @@ main :: proc() {
 		fmt.eprintfln("[%T.%v] %s", e, e.reason, e.message)
 		os.exit(1)
 	case flags.Open_File_Error:
-		fmt.eprintfln(
-			"[%T#%i] Unable to open file with perms 0o%o in mode 0x%x: %s",
-			e,
-			e.errno,
-			e.perms,
-			e.mode,
-			e.filename,
-		)
-		os.exit(1)
+		fmt.panicf("Unable to open file due to %v", e)
 	case flags.Help_Request:
-		flags.write_usage(os.stream_from_handle(os.stdout), Args, os.args[0])
+		flags.write_usage(os.to_stream(os.stdout), Args, os.args[0])
 		write_examples()
 		os.exit(0)
 	}
@@ -120,8 +111,8 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	cwd, cwd_ok := os2.get_working_directory(context.allocator)
-	if cwd_ok != os2.ERROR_NONE {
+	cwd, cwd_ok := os.get_working_directory(context.allocator)
+	if cwd_ok != os.ERROR_NONE {
 		fmt.eprintfln("ERROR: Could not determine the current working directory. %v", cwd_ok)
 	}
 	if !args.quiet {
@@ -132,9 +123,9 @@ main :: proc() {
 	ccounter := 0 // count content hits
 
 	// walk through current directory
-	w := os2.walker_create(cwd)
-	defer os2.walker_destroy(&w)
-	for walk in os2.walker_walk(&w) {
+	w := os.walker_create(cwd)
+	defer os.walker_destroy(&w)
+	for walk in os.walker_walk(&w) {
 		// only search for regular files
 		if walk.type != .Regular {
 			continue
@@ -147,8 +138,8 @@ main :: proc() {
 		}
 
 		// split into relative path
-		filepath, filepath_ok := os2.get_relative_path(cwd, walk.fullpath, context.allocator)
-		if filepath_ok != os2.ERROR_NONE {
+		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+		if filepath_ok != os.ERROR_NONE {
 			fmt.eprintfln(
 				"ERROR: Could not determine the relative file path for %v. %v",
 				walk.fullpath,
@@ -169,7 +160,7 @@ main :: proc() {
 			// get content of files
 			file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
 			defer delete(file_read, context.allocator)
-			if !file_read_ok {
+			if file_read_ok != os.ERROR_NONE {
 				fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
 			}
 
