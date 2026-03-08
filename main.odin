@@ -1,15 +1,20 @@
+// TODO: unit test for intersection
+// TODO: make sure to use temp allocator everywhere and delete it in the end
+
 package main
 
 import "core:flags"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:terminal/ansi"
 import "core:text/regex"
 
-VERSION :: "0.0.2"
+VERSION :: "0.0.3"
 // changelog
 // 0.0.2: colors for file path and line number
+// 0.0.3: color for content matches
 
 BLUE :: ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR
 GREEN :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
@@ -29,20 +34,94 @@ write_examples :: proc() {
 	fmt.println("\t\two \".odin$\" -c:\"\\bgingerBill\\b\"")
 }
 
-main2 :: proc() {
-	cpat, cpat_err := regex.create("def.*(foo)")
-	s1 := "def: foo"
-	s2 := " def: foo"
-	s3 := "foo def: bar"
-	s4 := "foo def: bar def"
-	s5 := "def def: bar def"
-	ss: []string = {s1, s2, s3, s4, s5}
-	for s in ss {
-		capture, cmatch := regex.match(cpat, s)
-		fmt.println(capture)
-		for pos in capture.pos {
+
+less :: proc(i, j: [2]int) -> (le: bool) {
+	le = false
+	if i[0] < j[0] {
+		le = true
+	} else if i[0] == j[0] {
+		if i[1] < j[1] {
+			le = true
 		}
 	}
+	return
+}
+
+interval_union :: proc(intervals: [][2]int) -> [][2]int {
+	slice.sort_by(intervals, less)
+	merge: [dynamic][2]int
+	for interval in intervals {
+		if len(merge) == 0 {
+			append(&merge, interval)
+		} else if merge[len(merge) - 1][1] < interval[0] { 	// no interval overlap
+			append(&merge, interval)
+		} else { 	// interval overlap
+			merge[len(merge) - 1][1] = max(merge[len(merge) - 1][1], interval[1])
+		}
+	}
+	return merge[:]
+}
+
+highlight :: proc(builder: ^strings.Builder, s: string, intervals: [][2]int) {
+	if len(intervals) == 0 {
+		strings.write_string(builder, s)
+		return
+	}
+	iu := interval_union(intervals)
+	left := 0
+	right := iu[0][0]
+	for interval, i in iu {
+		strings.write_string(builder, fmt.aprintf("%v", s[left:right]))
+		strings.write_string(
+			builder,
+			fmt.aprintf("%v%v%v", RED, s[interval[0]:interval[1]], RESET),
+		)
+		left = interval[1]
+		if i + 1 == len(iu) {
+			right = len(s)
+		} else {
+			right = iu[i + 1][0]
+		}
+	}
+	strings.write_string(builder, fmt.aprintf("%v", s[left:right]))
+}
+
+main2 :: proc() {
+	builder := strings.builder_make(context.temp_allocator)
+
+	cpat1, cpat_err1 := regex.create("def.*(foo)")
+	s1 := "my def: foo bar"
+	s2 := " def: foo"
+	s3 := "foo def: bar"
+	ss: []string = {s1, s2, s3}
+	for s in ss {
+		capture, cmatch := regex.match(cpat1, s)
+		iu := interval_union(capture.pos)
+		highlight(&builder, s, iu)
+		fmt.println("s =", strings.to_string(builder))
+		strings.builder_reset(&builder)
+	}
+
+	s6 := "foo and bar"
+	cpat2, cpat_err2 := regex.create("(bar|foo).*(foo|bar)")
+	capture, cmatch := regex.match(cpat2, s6)
+	fmt.println(capture)
+
+	s := "this sentence is short"
+	pos1: []int = {5, 16}
+	fmt.printfln("%v%v%v%v%v", s[:pos1[0]], RED, s[pos1[0]:pos1[1]], RESET, s[pos1[1]:])
+
+	pos2: [][2]int = {{5, 13}, {8, 16}}
+	fmt.println("pos2 =", pos2)
+	fmt.println("union =", interval_union(pos2))
+
+	pos2 = {{5, 6}, {8, 16}}
+	fmt.println("pos2 =", pos2)
+	fmt.println("union =", interval_union(pos2))
+
+	filepath := "foo/bar/baz"
+	linenr := 123
+	fmt.printfln("%v%v%v:%v%v%v", BLUE, filepath, RESET, GREEN, linenr, RESET)
 }
 
 main :: proc() {
@@ -101,7 +180,7 @@ main :: proc() {
 	}
 
 	do_cmatch := args.content_pattern != ""
-	cpat, cpat_err := regex.create(args.content_pattern) //, {.No_Capture})
+	cpat, cpat_err := regex.create(args.content_pattern)
 	if cpat_err != nil {
 		fmt.eprintfln(
 			"ERROR: Failed to create regular expression from content pattern \"%v\": %v. Maybe escaping is missing?",
@@ -121,6 +200,8 @@ main :: proc() {
 
 	fcounter := 0 // count file hits
 	ccounter := 0 // count content hits
+
+	builder := strings.builder_make(context.temp_allocator)
 
 	// walk through current directory
 	w := os.walker_create(cwd)
@@ -145,6 +226,7 @@ main :: proc() {
 				walk.fullpath,
 				cwd_ok,
 			)
+			continue
 		}
 
 		// exclude files matching the exclude pattern
@@ -155,6 +237,9 @@ main :: proc() {
 			}
 		}
 
+		strings.builder_reset(&builder)
+		filepath_color := fmt.aprintf("%v%v%v", BLUE, filepath, RESET)
+
 		fcounter += 1
 		if do_cmatch {
 			// get content of files
@@ -162,6 +247,7 @@ main :: proc() {
 			defer delete(file_read, context.allocator)
 			if file_read_ok != os.ERROR_NONE {
 				fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
+				continue
 			}
 
 			it := string(file_read)
@@ -170,30 +256,23 @@ main :: proc() {
 			// search through file and print content matches
 			for str in strings.split_lines_after_iterator(&it) {
 				linenr += 1
-				_, cmatch := regex.match(cpat, str)
+				ccapture, cmatch := regex.match(cpat, str)
 				if cmatch {
 					had_match = true
 					ccounter += 1
-					if !args.quiet {
-						fmt.printf(
-							BLUE + "%v" + RESET + ":" + GREEN + "%v" + RESET + ": %v",
-							filepath,
-							linenr,
-							str,
-						)
-					}
-				}
-			}
-			if !args.quiet {
-				// an empty line between files if we print content matches
-				if had_match {
-					//fmt.println()
+					strings.write_string(
+						&builder,
+						fmt.aprintf("%v:%v%v%v:", filepath_color, GREEN, linenr, RESET),
+					)
+					highlight(&builder, str, ccapture.pos)
 				}
 			}
 		} else {
-			if !args.quiet {
-				fmt.println(filepath)
-			}
+			strings.write_string(&builder, filepath)
+		}
+
+		if !args.quiet {
+			fmt.print(strings.to_string(builder))
 		}
 	}
 
