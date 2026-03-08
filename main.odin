@@ -5,6 +5,7 @@ package main
 
 import "core:flags"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -68,13 +69,23 @@ highlight :: proc(builder: ^strings.Builder, s: string, intervals: [][2]int) {
 		return
 	}
 	iu := interval_union(intervals)
+	defer delete(iu)
 	left := 0
 	right := iu[0][0]
 	for interval, i in iu {
-		strings.write_string(builder, fmt.aprintf("%v", s[left:right]))
 		strings.write_string(
 			builder,
-			fmt.aprintf("%v%v%v", RED, s[interval[0]:interval[1]], RESET),
+			fmt.aprintf("%v", s[left:right], allocator = context.temp_allocator),
+		)
+		strings.write_string(
+			builder,
+			fmt.aprintf(
+				"%v%v%v",
+				RED,
+				s[interval[0]:interval[1]],
+				RESET,
+				allocator = context.temp_allocator,
+			),
 		)
 		left = interval[1]
 		if i + 1 == len(iu) {
@@ -83,7 +94,10 @@ highlight :: proc(builder: ^strings.Builder, s: string, intervals: [][2]int) {
 			right = iu[i + 1][0]
 		}
 	}
-	strings.write_string(builder, fmt.aprintf("%v", s[left:right]))
+	strings.write_string(
+		builder,
+		fmt.aprintf("%v", s[left:right], allocator = context.temp_allocator),
+	)
 }
 
 main2 :: proc() {
@@ -125,6 +139,47 @@ main2 :: proc() {
 }
 
 main :: proc() {
+	// allocation tracking
+	when ODIN_DEBUG {
+		track1: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track1, context.allocator)
+		context.allocator = mem.tracking_allocator(&track1)
+
+		defer {
+			if len(track1.allocation_map) > 0 {
+				fmt.eprintf(
+					"=== %v context.allocator allocations not freed: ===\n",
+					len(track1.allocation_map),
+				)
+				for _, entry in track1.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			} else {
+				fmt.printfln("=== context.allocator tracking was active ===")
+			}
+			mem.tracking_allocator_destroy(&track1)
+		}
+
+		track2: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track2, context.temp_allocator)
+		context.temp_allocator = mem.tracking_allocator(&track2)
+
+		defer {
+			if len(track2.allocation_map) > 0 {
+				fmt.eprintf(
+					"=== %v context.temp_allocator allocations not freed: ===\n",
+					len(track2.allocation_map),
+				)
+				for _, entry in track2.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			} else {
+				fmt.printfln("=== context.temp_allocator tracking was active ===")
+			}
+			mem.tracking_allocator_destroy(&track2)
+		}
+	}
+
 	// this is kind of a hack but I don't see how to handle this when a flag is marked required
 	if len(os.args) == 2 && os.args[1] == "-v" {
 		fmt.printfln("wo %v", VERSION)
@@ -159,6 +214,7 @@ main :: proc() {
 	}
 
 	fpat, fpat_err := regex.create(args.filename_pattern, {.No_Capture})
+	defer regex.destroy_regex(fpat)
 	if fpat_err != nil {
 		fmt.eprintfln(
 			"ERROR: Failed to create regular expression from filename pattern \"%v\": %v. Maybe escaping is missing?",
@@ -170,6 +226,7 @@ main :: proc() {
 
 	do_ematch := args.exclude_pattern != ""
 	epat, epat_err := regex.create(args.exclude_pattern, {.No_Capture})
+	defer regex.destroy_regex(epat)
 	if epat_err != nil {
 		fmt.eprintfln(
 			"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v. Maybe escaping is missing?",
@@ -181,6 +238,7 @@ main :: proc() {
 
 	do_cmatch := args.content_pattern != ""
 	cpat, cpat_err := regex.create(args.content_pattern)
+	defer regex.destroy_regex(cpat)
 	if cpat_err != nil {
 		fmt.eprintfln(
 			"ERROR: Failed to create regular expression from content pattern \"%v\": %v. Maybe escaping is missing?",
@@ -190,7 +248,7 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	cwd, cwd_ok := os.get_working_directory(context.allocator)
+	cwd, cwd_ok := os.get_working_directory(context.temp_allocator)
 	if cwd_ok != os.ERROR_NONE {
 		fmt.eprintfln("ERROR: Could not determine the current working directory. %v", cwd_ok)
 	}
@@ -219,7 +277,7 @@ main :: proc() {
 		}
 
 		// split into relative path
-		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.temp_allocator)
 		if filepath_ok != os.ERROR_NONE {
 			fmt.eprintfln(
 				"ERROR: Could not determine the relative file path for %v. %v",
@@ -239,12 +297,12 @@ main :: proc() {
 
 		strings.builder_reset(&builder)
 		filepath_color := fmt.aprintf("%v%v%v", BLUE, filepath, RESET)
+		defer delete(filepath_color)
 
 		fcounter += 1
 		if do_cmatch {
 			// get content of files
-			file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
-			defer delete(file_read, context.allocator)
+			file_read, file_read_ok := os.read_entire_file(filepath, context.temp_allocator)
 			if file_read_ok != os.ERROR_NONE {
 				fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
 				continue
@@ -257,12 +315,20 @@ main :: proc() {
 			for str in strings.split_lines_after_iterator(&it) {
 				linenr += 1
 				ccapture, cmatch := regex.match(cpat, str)
+				defer regex.destroy_capture(ccapture)
 				if cmatch {
 					had_match = true
 					ccounter += 1
 					strings.write_string(
 						&builder,
-						fmt.aprintf("%v:%v%v%v:", filepath_color, GREEN, linenr, RESET),
+						fmt.aprintf(
+							"%v:%v%v%v:",
+							filepath_color,
+							GREEN,
+							linenr,
+							RESET,
+							allocator = context.temp_allocator,
+						),
 					)
 					highlight(&builder, str, ccapture.pos)
 				}
@@ -280,4 +346,6 @@ main :: proc() {
 	if do_cmatch {
 		fmt.printfln("%v content hits", ccounter)
 	}
+
+	free_all(context.temp_allocator)
 }
