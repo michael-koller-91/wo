@@ -155,7 +155,7 @@ main :: proc() {
 					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
 				}
 			} else {
-				fmt.printfln("=== context.allocator tracking was active ===")
+				fmt.printfln("=== context.allocator tracking was active (no missed frees) ===")
 			}
 			mem.tracking_allocator_destroy(&track1)
 		}
@@ -174,7 +174,9 @@ main :: proc() {
 					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
 				}
 			} else {
-				fmt.printfln("=== context.temp_allocator tracking was active ===")
+				fmt.printfln(
+					"=== context.temp_allocator tracking was active (no missed frees) ===",
+				)
 			}
 			mem.tracking_allocator_destroy(&track2)
 		}
@@ -248,7 +250,8 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	cwd, cwd_ok := os.get_working_directory(context.temp_allocator)
+	cwd, cwd_ok := os.get_working_directory(context.allocator)
+	defer delete(cwd)
 	if cwd_ok != os.ERROR_NONE {
 		fmt.eprintfln("ERROR: Could not determine the current working directory. %v", cwd_ok)
 	}
@@ -259,25 +262,37 @@ main :: proc() {
 	fcounter := 0 // count file hits
 	ccounter := 0 // count content hits
 
-	builder := strings.builder_make(context.temp_allocator)
+	builder := strings.builder_make()
+
+	ecapture := regex.preallocate_capture()
+	defer regex.destroy_capture(ecapture)
+
+	fcapture := regex.preallocate_capture()
+	defer regex.destroy_capture(fcapture)
+
+	ccapture := regex.preallocate_capture()
+	defer regex.destroy_capture(ccapture)
 
 	// walk through current directory
 	w := os.walker_create(cwd)
 	defer os.walker_destroy(&w)
 	for walk in os.walker_walk(&w) {
+		defer free_all(context.temp_allocator) // this includes what the regex virtual machine allocates
+
 		// only search for regular files
 		if walk.type != .Regular {
 			continue
 		}
 
 		// exclude files not matching the file pattern
-		_, fmatch := regex.match(fpat, walk.name)
+		_, fmatch := regex.match(fpat, walk.name, &fcapture)
 		if !fmatch {
 			continue
 		}
 
 		// split into relative path
-		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.temp_allocator)
+		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+		defer delete(filepath)
 		if filepath_ok != os.ERROR_NONE {
 			fmt.eprintfln(
 				"ERROR: Could not determine the relative file path for %v. %v",
@@ -289,7 +304,7 @@ main :: proc() {
 
 		// exclude files matching the exclude pattern
 		if do_ematch {
-			_, ematch := regex.match(epat, filepath)
+			_, ematch := regex.match(epat, filepath, &ecapture)
 			if ematch {
 				continue
 			}
@@ -302,7 +317,8 @@ main :: proc() {
 		fcounter += 1
 		if do_cmatch {
 			// get content of files
-			file_read, file_read_ok := os.read_entire_file(filepath, context.temp_allocator)
+			file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
+			defer delete(file_read)
 			if file_read_ok != os.ERROR_NONE {
 				fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
 				continue
@@ -314,8 +330,7 @@ main :: proc() {
 			// search through file and print content matches
 			for str in strings.split_lines_after_iterator(&it) {
 				linenr += 1
-				ccapture, cmatch := regex.match(cpat, str)
-				defer regex.destroy_capture(ccapture)
+				cnumgrps, cmatch := regex.match(cpat, str, &ccapture)
 				if cmatch {
 					had_match = true
 					ccounter += 1
@@ -330,7 +345,7 @@ main :: proc() {
 							allocator = context.temp_allocator,
 						),
 					)
-					highlight(&builder, str, ccapture.pos)
+					highlight(&builder, str, ccapture.pos[:cnumgrps])
 				}
 			}
 		} else {
@@ -339,13 +354,13 @@ main :: proc() {
 
 		if !args.quiet {
 			fmt.print(strings.to_string(builder))
+			strings.builder_reset(&builder)
 		}
 	}
+	strings.builder_destroy(&builder)
 
 	fmt.printfln("%v file hits", fcounter)
 	if do_cmatch {
 		fmt.printfln("%v content hits", ccounter)
 	}
-
-	free_all(context.temp_allocator)
 }
