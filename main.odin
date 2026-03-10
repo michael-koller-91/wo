@@ -1,5 +1,4 @@
 // TODO: unit test for intersection
-// TODO: make sure to use temp allocator everywhere and delete it in the end
 
 package main
 
@@ -63,7 +62,12 @@ interval_union :: proc(intervals: [][2]int) -> [][2]int {
 	return merge[:]
 }
 
-highlight :: proc(builder: ^strings.Builder, s: string, intervals: [][2]int) {
+highlight :: proc(
+	builder: ^strings.Builder,
+	s: string,
+	intervals: [][2]int,
+	allocator := context.allocator,
+) {
 	if len(intervals) == 0 {
 		strings.write_string(builder, s)
 		return
@@ -73,19 +77,10 @@ highlight :: proc(builder: ^strings.Builder, s: string, intervals: [][2]int) {
 	left := 0
 	right := iu[0][0]
 	for interval, i in iu {
+		strings.write_string(builder, fmt.aprintf("%v", s[left:right], allocator = allocator))
 		strings.write_string(
 			builder,
-			fmt.aprintf("%v", s[left:right], allocator = context.temp_allocator),
-		)
-		strings.write_string(
-			builder,
-			fmt.aprintf(
-				"%v%v%v",
-				RED,
-				s[interval[0]:interval[1]],
-				RESET,
-				allocator = context.temp_allocator,
-			),
+			fmt.aprintf("%v%v%v", RED, s[interval[0]:interval[1]], RESET, allocator = allocator),
 		)
 		left = interval[1]
 		if i + 1 == len(iu) {
@@ -94,10 +89,7 @@ highlight :: proc(builder: ^strings.Builder, s: string, intervals: [][2]int) {
 			right = iu[i + 1][0]
 		}
 	}
-	strings.write_string(
-		builder,
-		fmt.aprintf("%v", s[left:right], allocator = context.temp_allocator),
-	)
+	strings.write_string(builder, fmt.aprintf("%v", s[left:right], allocator = allocator))
 }
 
 main2 :: proc() {
@@ -345,7 +337,12 @@ main :: proc() {
 							allocator = context.temp_allocator,
 						),
 					)
-					highlight(&builder, str, ccapture.pos[:cnumgrps])
+					highlight(
+						&builder,
+						str,
+						ccapture.pos[:cnumgrps],
+						allocator = context.temp_allocator,
+					)
 				}
 			}
 		} else {
