@@ -34,7 +34,6 @@ write_examples :: proc() {
 	fmt.println("\t\two \".odin$\" -c:\"\\bgingerBill\\b\"")
 }
 
-
 less :: proc(i, j: [2]int) -> (le: bool) {
 	le = false
 	if i[0] < j[0] {
