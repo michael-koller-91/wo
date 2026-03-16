@@ -10,31 +10,6 @@ import "core:thread"
 
 consumer :: proc(task: thread.Task) {
 	when ODIN_DEBUG {
-		track_allocator: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track_allocator, context.allocator)
-		context.allocator = mem.tracking_allocator(&track_allocator)
-
-		defer {
-			if len(track_allocator.allocation_map) > 0 {
-				fmt.eprintf(
-					"[TASK(%v)] === %v context.allocator allocations not freed: ===\n",
-					task.user_index,
-					len(track_allocator.allocation_map),
-				)
-				for _, entry in track_allocator.allocation_map {
-					fmt.eprintf(
-						"(%v) - %v bytes @ %v\n",
-						task.user_index,
-						entry.size,
-						entry.location,
-					)
-				}
-			} else {
-				fmt.printfln("[TASK(%v)] context.allocator tracking was active", task.user_index)
-			}
-			mem.tracking_allocator_destroy(&track_allocator)
-		}
-
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.temp_allocator)
 		context.temp_allocator = mem.tracking_allocator(&track)
@@ -62,6 +37,32 @@ consumer :: proc(task: thread.Task) {
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
+
+		track_allocator: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track_allocator, context.allocator)
+		context.allocator = mem.tracking_allocator(&track_allocator)
+
+		defer {
+			if len(track_allocator.allocation_map) > 0 {
+				fmt.eprintf(
+					"[TASK(%v)] === %v context.allocator allocations not freed: ===\n",
+					task.user_index,
+					len(track_allocator.allocation_map),
+				)
+				for _, entry in track_allocator.allocation_map {
+					fmt.eprintf(
+						"(%v) - %v bytes @ %v\n",
+						task.user_index,
+						entry.size,
+						entry.location,
+					)
+				}
+			} else {
+				fmt.printfln("[TASK(%v)] context.allocator tracking was active", task.user_index)
+			}
+			mem.tracking_allocator_destroy(&track_allocator)
+		}
+
 	}
 
 	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] starting", task.user_index)}
@@ -175,10 +176,8 @@ main :: proc() {
 		mem.dynamic_arena_init(&arenas[i], alignment = 64) // alignment is here due to a bug: https://github.com/odin-lang/Odin/issues/4195
 		allocators[i] = mem.dynamic_arena_allocator(&arenas[i])
 		thread.pool_add_task(&pool, allocators[i], consumer, &c, i)
-
-		when ODIN_DEBUG {
-		}
 	}
+
 	defer for i in 0 ..< NUM_THREADS {
 		mem.dynamic_arena_destroy(&arenas[i])
 	}
