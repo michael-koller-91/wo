@@ -10,6 +10,31 @@ import "core:thread"
 
 consumer :: proc(task: thread.Task) {
 	when ODIN_DEBUG {
+		track_allocator: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track_allocator, context.allocator)
+		context.allocator = mem.tracking_allocator(&track_allocator)
+
+		defer {
+			if len(track_allocator.allocation_map) > 0 {
+				fmt.eprintf(
+					"[TASK(%v)] === %v context.allocator allocations not freed: ===\n",
+					task.user_index,
+					len(track_allocator.allocation_map),
+				)
+				for _, entry in track_allocator.allocation_map {
+					fmt.eprintf(
+						"(%v) - %v bytes @ %v\n",
+						task.user_index,
+						entry.size,
+						entry.location,
+					)
+				}
+			} else {
+				fmt.printfln("[TASK(%v)] context.allocator tracking was active", task.user_index)
+			}
+			mem.tracking_allocator_destroy(&track_allocator)
+		}
+
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.temp_allocator)
 		context.temp_allocator = mem.tracking_allocator(&track)
@@ -17,9 +42,9 @@ consumer :: proc(task: thread.Task) {
 		defer {
 			if len(track.allocation_map) > 0 {
 				fmt.eprintf(
-					"=== %v task(%v).context.temp_allocator allocations not freed: ===\n",
-					len(track.allocation_map),
+					"[TASK(%v)] === %v context.temp_allocator allocations not freed: ===\n",
 					task.user_index,
+					len(track.allocation_map),
 				)
 				for _, entry in track.allocation_map {
 					fmt.eprintf(
@@ -31,7 +56,7 @@ consumer :: proc(task: thread.Task) {
 				}
 			} else {
 				fmt.printfln(
-					"=== task(%v).context.temp_allocator tracking was active ===",
+					"[TASK(%v)] context.temp_allocator tracking was active",
 					task.user_index,
 				)
 			}
@@ -39,18 +64,17 @@ consumer :: proc(task: thread.Task) {
 		}
 	}
 
-	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] Starting.", task.user_index)}
+	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] starting", task.user_index)}
 	chan_rec := cast(^chan.Chan(string))task.data
 	for {
 		value, ok := chan.recv(chan_rec^)
-		defer delete(value)
 		defer free_all(context.temp_allocator)
 		if !ok {
 			break // More idiomatic than return here
 		}
 		process_file(value, context.temp_allocator)
 	}
-	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] Channel closed, stopping.", task.user_index)}
+	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] channel closed, stopping", task.user_index)}
 }
 
 process_file :: proc(filepath: string, allocator: mem.Allocator) {
@@ -145,54 +169,34 @@ main :: proc() {
 	thread.pool_init(&pool, context.allocator, NUM_THREADS)
 	defer thread.pool_destroy(&pool)
 
+	arenas: [NUM_THREADS]mem.Dynamic_Arena
+	allocators: [NUM_THREADS]mem.Allocator
 	for i in 0 ..< NUM_THREADS {
-		thread.pool_add_task(&pool, context.allocator, consumer, &c, i)
+		mem.dynamic_arena_init(&arenas[i], alignment = 64) // alignment is here due to a bug: https://github.com/odin-lang/Odin/issues/4195
+		allocators[i] = mem.dynamic_arena_allocator(&arenas[i])
+		thread.pool_add_task(&pool, allocators[i], consumer, &c, i)
+
+		when ODIN_DEBUG {
+		}
+	}
+	defer for i in 0 ..< NUM_THREADS {
+		mem.dynamic_arena_destroy(&arenas[i])
 	}
 
 	thread.pool_start(&pool)
 	send_chan := chan.as_send(c)
 
 	for walk in os.walker_walk(&w) {
-		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.temp_allocator)
 		success := chan.send(send_chan, filepath)
 		if !success {
 			fmt.println("[PRODUCER] Failed to send, channel may be closed.")
 			return
 		}
 	}
+	defer free_all(context.temp_allocator) // I don't know how to free `filepath` when `context.allocator` is used, so I do this.
 
 	chan.close(send_chan)
-	thread.pool_join(&pool)
-	//thread.pool_finish(&pool)
-
-	/*
-	{
-		temp_arena: mem.Dynamic_Arena
-		mem.dynamic_arena_init(&temp_arena)
-		temp_allocator := mem.dynamic_arena_allocator(&temp_arena)
-
-		temp_track: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&temp_track, temp_allocator)
-		temp_allocator = mem.tracking_allocator(&temp_track)
-		defer mem.dynamic_arena_destroy(&temp_arena)
-
-		defer {
-			if len(temp_track.allocation_map) > 0 {
-				fmt.eprintf(
-					"=== %v temp_allocator (2) allocations not freed: ===\n",
-					len(temp_track.allocation_map),
-				)
-				for _, entry in temp_track.allocation_map {
-					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
-				}
-			} else {
-				fmt.printfln("=== temp_allocator (2) tracking was active ===")
-			}
-			mem.tracking_allocator_destroy(&temp_track)
-		}
-
-		a := fmt.aprintf("foo = %v", 5, allocator = temp_allocator)
-		free_all(temp_allocator)
-	}
-	*/
+	//thread.pool_join(&pool)
+	thread.pool_finish(&pool)
 }
