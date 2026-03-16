@@ -187,6 +187,12 @@ main :: proc() {
 
 	for walk in os.walker_walk(&w) {
 		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.temp_allocator)
+
+		// only search for regular files
+		if walk.type != .Regular {
+			continue
+		}
+
 		success := chan.send(send_chan, filepath)
 		if !success {
 			fmt.println("[PRODUCER] Failed to send, channel may be closed.")

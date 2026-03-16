@@ -91,6 +91,100 @@ highlight :: proc(
 	strings.write_string(builder, fmt.aprintf("%v", s[left:right], allocator = allocator))
 }
 
+match_file :: proc(
+	fpat, epat, cpat: regex.Regular_Expression,
+	fcapture, ecapture, ccapture: ^regex.Capture,
+	builder: ^strings.Builder,
+	do_ematch, do_cmatch: bool,
+	quiet: bool,
+	walk: os.File_Info,
+	cwd: string,
+) -> (
+	fcounter, ccounter: int,
+) {
+	fcounter = 0
+	ccounter = 0
+
+	// exclude files not matching the file pattern
+	_, fmatch := regex.match(fpat, walk.name, fcapture)
+	if !fmatch {
+		return
+	}
+
+	// split into relative path
+	filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+	defer delete(filepath)
+	if filepath_ok != os.ERROR_NONE {
+		fmt.eprintfln(
+			"ERROR: Could not determine the relative file path for %v. %v",
+			walk.fullpath,
+			filepath_ok,
+		)
+		return
+	}
+
+	// exclude files matching the exclude pattern
+	if do_ematch {
+		_, ematch := regex.match(epat, filepath, ecapture)
+		if ematch {
+			return
+		}
+	}
+
+	strings.builder_reset(builder)
+	filepath_color := fmt.aprintf("%v%v%v", BLUE, filepath, RESET)
+	defer delete(filepath_color)
+
+	fcounter = 1
+	if do_cmatch {
+		// get content of files
+		file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
+		defer delete(file_read)
+		if file_read_ok != os.ERROR_NONE {
+			fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
+			return
+		}
+
+		it := string(file_read)
+		linenr := 0
+		had_match := false
+		// search through file and print content matches
+		for str in strings.split_lines_after_iterator(&it) {
+			linenr += 1
+			cnumgrps, cmatch := regex.match(cpat, str, ccapture)
+			if cmatch {
+				had_match = true
+				ccounter += 1
+				strings.write_string(
+					builder,
+					fmt.aprintf(
+						"%v:%v%v%v:",
+						filepath_color,
+						GREEN,
+						linenr,
+						RESET,
+						allocator = context.temp_allocator,
+					),
+				)
+				highlight(
+					builder,
+					str,
+					ccapture^.pos[:cnumgrps],
+					allocator = context.temp_allocator,
+				)
+			}
+		}
+	} else {
+		strings.write_string(builder, filepath)
+	}
+
+	if !quiet {
+		fmt.print(strings.to_string(builder^))
+		strings.builder_reset(builder)
+	}
+	return
+}
+
 main2 :: proc() {
 	builder := strings.builder_make(context.temp_allocator)
 
@@ -275,83 +369,23 @@ main :: proc() {
 			continue
 		}
 
-		// exclude files not matching the file pattern
-		_, fmatch := regex.match(fpat, walk.name, &fcapture)
-		if !fmatch {
-			continue
-		}
+		f, c := match_file(
+			fpat,
+			epat,
+			cpat,
+			&fcapture,
+			&ecapture,
+			&ccapture,
+			&builder,
+			do_ematch,
+			do_cmatch,
+			args.quiet,
+			walk,
+			cwd,
+		)
+		fcounter += f
+		ccounter += c
 
-		// split into relative path
-		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
-		defer delete(filepath)
-		if filepath_ok != os.ERROR_NONE {
-			fmt.eprintfln(
-				"ERROR: Could not determine the relative file path for %v. %v",
-				walk.fullpath,
-				cwd_ok,
-			)
-			continue
-		}
-
-		// exclude files matching the exclude pattern
-		if do_ematch {
-			_, ematch := regex.match(epat, filepath, &ecapture)
-			if ematch {
-				continue
-			}
-		}
-
-		strings.builder_reset(&builder)
-		filepath_color := fmt.aprintf("%v%v%v", BLUE, filepath, RESET)
-		defer delete(filepath_color)
-
-		fcounter += 1
-		if do_cmatch {
-			// get content of files
-			file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
-			defer delete(file_read)
-			if file_read_ok != os.ERROR_NONE {
-				fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
-				continue
-			}
-
-			it := string(file_read)
-			linenr := 0
-			had_match := false
-			// search through file and print content matches
-			for str in strings.split_lines_after_iterator(&it) {
-				linenr += 1
-				cnumgrps, cmatch := regex.match(cpat, str, &ccapture)
-				if cmatch {
-					had_match = true
-					ccounter += 1
-					strings.write_string(
-						&builder,
-						fmt.aprintf(
-							"%v:%v%v%v:",
-							filepath_color,
-							GREEN,
-							linenr,
-							RESET,
-							allocator = context.temp_allocator,
-						),
-					)
-					highlight(
-						&builder,
-						str,
-						ccapture.pos[:cnumgrps],
-						allocator = context.temp_allocator,
-					)
-				}
-			}
-		} else {
-			strings.write_string(&builder, filepath)
-		}
-
-		if !args.quiet {
-			fmt.print(strings.to_string(builder))
-			strings.builder_reset(&builder)
-		}
 	}
 	strings.builder_destroy(&builder)
 
