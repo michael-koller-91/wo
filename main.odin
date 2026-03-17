@@ -8,18 +8,31 @@ import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:sync/chan"
 import "core:terminal/ansi"
 import "core:text/regex"
+import "core:thread"
 
 VERSION :: "0.0.3"
 // changelog
 // 0.0.2: colors for file path and line number
 // 0.0.3: color for content matches
 
+NUM_THREADS :: 1
+
 BLUE :: ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR
 GREEN :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
 RED :: ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR
 RESET :: ansi.CSI + ansi.RESET + ansi.SGR
+
+Task_Data :: struct {
+	chan:     chan.Chan(os.File_Info),
+	quiet:    bool,
+	fpattern: string,
+	epattern: string,
+	cpattern: string,
+	cwd:      string,
+}
 
 write_examples :: proc() {
 	fmt.println("Examples:")
@@ -91,13 +104,161 @@ highlight :: proc(
 	strings.write_string(builder, fmt.aprintf("%v", s[left:right], allocator = allocator))
 }
 
+file_matcher :: proc(task: thread.Task) {
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.temp_allocator)
+		context.temp_allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf(
+					"[TASK(%v)] === %v context.temp_allocator allocations not freed: ===\n",
+					task.user_index,
+					len(track.allocation_map),
+				)
+				for _, entry in track.allocation_map {
+					fmt.eprintf(
+						"(%v) - %v bytes @ %v\n",
+						task.user_index,
+						entry.size,
+						entry.location,
+					)
+				}
+			} else {
+				fmt.printfln(
+					"[TASK(%v)] context.temp_allocator tracking was active (no missed frees)",
+					task.user_index,
+				)
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+
+		track_allocator: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track_allocator, context.allocator)
+		context.allocator = mem.tracking_allocator(&track_allocator)
+
+		defer {
+			if len(track_allocator.allocation_map) > 0 {
+				fmt.eprintf(
+					"[TASK(%v)] === %v context.allocator allocations not freed: ===\n",
+					task.user_index,
+					len(track_allocator.allocation_map),
+				)
+				for _, entry in track_allocator.allocation_map {
+					fmt.eprintf(
+						"(%v) - %v bytes @ %v\n",
+						task.user_index,
+						entry.size,
+						entry.location,
+					)
+				}
+			} else {
+				fmt.printfln(
+					"[TASK(%v)] context.allocator tracking was active (no missed frees)",
+					task.user_index,
+				)
+			}
+			mem.tracking_allocator_destroy(&track_allocator)
+		}
+
+	}
+
+	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] starting", task.user_index)}
+	task_data := cast(^Task_Data)task.data
+
+	fpat, fpat_err := regex.create(task_data.fpattern, {.No_Capture})
+	defer regex.destroy_regex(fpat)
+	if fpat_err != nil {
+		if task.user_index == 0 {
+			fmt.eprintfln(
+				"ERROR: Failed to create regular expression from filename pattern \"%v\": %v. Maybe escaping is missing?",
+				task_data.fpattern,
+				fpat_err,
+			)
+		}
+		os.exit(1)
+	}
+
+	do_ematch := task_data.epattern != ""
+	epat, epat_err := regex.create(task_data.epattern, {.No_Capture})
+	defer regex.destroy_regex(epat)
+	if epat_err != nil {
+		if task.user_index == 0 {
+			fmt.eprintfln(
+				"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v. Maybe escaping is missing?",
+				task_data.epattern,
+				epat_err,
+			)
+		}
+		os.exit(1)
+	}
+
+	do_cmatch := task_data.cpattern != ""
+	cpat, cpat_err := regex.create(task_data.cpattern)
+	defer regex.destroy_regex(cpat)
+	if cpat_err != nil {
+		if task.user_index == 0 {
+			fmt.eprintfln(
+				"ERROR: Failed to create regular expression from content pattern \"%v\": %v. Maybe escaping is missing?",
+				task_data.cpattern,
+				cpat_err,
+			)
+		}
+		os.exit(1)
+	}
+
+	ecapture := regex.preallocate_capture()
+	defer regex.destroy_capture(ecapture)
+
+	fcapture := regex.preallocate_capture()
+	defer regex.destroy_capture(fcapture)
+
+	ccapture := regex.preallocate_capture()
+	defer regex.destroy_capture(ccapture)
+
+	builder := strings.builder_make()
+	defer strings.builder_destroy(&builder)
+
+	fcounter := 0 // count file hits
+	ccounter := 0 // count content hits
+
+	chan_rec := task_data^.chan
+	for {
+		walk, ok := chan.recv(chan_rec)
+		defer free_all(context.temp_allocator)
+		if !ok {
+			break // More idiomatic than return here
+		}
+		f, c := match_file(
+			&fpat,
+			&epat,
+			&cpat,
+			&fcapture,
+			&ecapture,
+			&ccapture,
+			&builder,
+			do_ematch,
+			do_cmatch,
+			task_data.quiet,
+			walk.name,
+			walk.fullpath,
+			task_data.cwd,
+		)
+		fcounter += f
+		ccounter += c
+	}
+	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] channel closed, stopping", task.user_index)}
+}
+
 match_file :: proc(
-	fpat, epat, cpat: regex.Regular_Expression,
+	fpat, epat, cpat: ^regex.Regular_Expression,
 	fcapture, ecapture, ccapture: ^regex.Capture,
 	builder: ^strings.Builder,
 	do_ematch, do_cmatch: bool,
 	quiet: bool,
-	walk: os.File_Info,
+	walk_name: string,
+	walk_fullpath: string,
 	cwd: string,
 ) -> (
 	fcounter, ccounter: int,
@@ -106,18 +267,18 @@ match_file :: proc(
 	ccounter = 0
 
 	// exclude files not matching the file pattern
-	_, fmatch := regex.match(fpat, walk.name, fcapture)
+	_, fmatch := regex.match(fpat^, walk_name, fcapture)
 	if !fmatch {
 		return
 	}
 
 	// split into relative path
-	filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+	filepath, filepath_ok := os.get_relative_path(cwd, walk_fullpath, context.allocator)
 	defer delete(filepath)
 	if filepath_ok != os.ERROR_NONE {
 		fmt.eprintfln(
 			"ERROR: Could not determine the relative file path for %v. %v",
-			walk.fullpath,
+			walk_fullpath,
 			filepath_ok,
 		)
 		return
@@ -125,7 +286,7 @@ match_file :: proc(
 
 	// exclude files matching the exclude pattern
 	if do_ematch {
-		_, ematch := regex.match(epat, filepath, ecapture)
+		_, ematch := regex.match(epat^, filepath, ecapture)
 		if ematch {
 			return
 		}
@@ -151,7 +312,7 @@ match_file :: proc(
 		// search through file and print content matches
 		for str in strings.split_lines_after_iterator(&it) {
 			linenr += 1
-			cnumgrps, cmatch := regex.match(cpat, str, ccapture)
+			cnumgrps, cmatch := regex.match(cpat^, str, ccapture)
 			if cmatch {
 				had_match = true
 				ccounter += 1
@@ -273,7 +434,6 @@ main :: proc() {
 		os.exit(0)
 	}
 
-
 	Args :: struct {
 		filename_pattern: string `args:"pos=0,required" usage:"Filename pattern. Find every file whose name matches this pattern."`,
 		exclude_pattern:  string `args:"name=e" usage:"Exclude pattern. Exclude every file whose path matches this pattern."`,
@@ -300,41 +460,6 @@ main :: proc() {
 		os.exit(0)
 	}
 
-	fpat, fpat_err := regex.create(args.filename_pattern, {.No_Capture})
-	defer regex.destroy_regex(fpat)
-	if fpat_err != nil {
-		fmt.eprintfln(
-			"ERROR: Failed to create regular expression from filename pattern \"%v\": %v. Maybe escaping is missing?",
-			args.filename_pattern,
-			fpat_err,
-		)
-		os.exit(1)
-	}
-
-	do_ematch := args.exclude_pattern != ""
-	epat, epat_err := regex.create(args.exclude_pattern, {.No_Capture})
-	defer regex.destroy_regex(epat)
-	if epat_err != nil {
-		fmt.eprintfln(
-			"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v. Maybe escaping is missing?",
-			args.exclude_pattern,
-			epat_err,
-		)
-		os.exit(1)
-	}
-
-	do_cmatch := args.content_pattern != ""
-	cpat, cpat_err := regex.create(args.content_pattern)
-	defer regex.destroy_regex(cpat)
-	if cpat_err != nil {
-		fmt.eprintfln(
-			"ERROR: Failed to create regular expression from content pattern \"%v\": %v. Maybe escaping is missing?",
-			args.content_pattern,
-			cpat_err,
-		)
-		os.exit(1)
-	}
-
 	cwd, cwd_ok := os.get_working_directory(context.allocator)
 	defer delete(cwd)
 	if cwd_ok != os.ERROR_NONE {
@@ -347,50 +472,68 @@ main :: proc() {
 	fcounter := 0 // count file hits
 	ccounter := 0 // count content hits
 
-	builder := strings.builder_make()
+	c, err := chan.create(chan.Chan(os.File_Info), context.allocator)
+	assert(err == .None)
+	defer chan.destroy(c)
 
-	ecapture := regex.preallocate_capture()
-	defer regex.destroy_capture(ecapture)
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, NUM_THREADS)
+	defer thread.pool_destroy(&pool)
 
-	fcapture := regex.preallocate_capture()
-	defer regex.destroy_capture(fcapture)
+	task_data: Task_Data = {
+		chan     = c,
+		quiet    = args.quiet,
+		cpattern = args.content_pattern,
+		epattern = args.exclude_pattern,
+		fpattern = args.filename_pattern,
+		cwd      = cwd,
+	}
 
-	ccapture := regex.preallocate_capture()
-	defer regex.destroy_capture(ccapture)
+	arenas: [NUM_THREADS]mem.Dynamic_Arena
+	allocators: [NUM_THREADS]mem.Allocator
+	for i in 0 ..< NUM_THREADS {
+		mem.dynamic_arena_init(&arenas[i], alignment = 64) // alignment is here due to a bug: https://github.com/odin-lang/Odin/issues/4195
+		allocators[i] = mem.dynamic_arena_allocator(&arenas[i])
+		thread.pool_add_task(&pool, allocators[i], file_matcher, &task_data, i)
+	}
+	defer for i in 0 ..< NUM_THREADS {
+		mem.dynamic_arena_destroy(&arenas[i])
+	}
+
+	send_chan := chan.as_send(c)
+	thread.pool_start(&pool)
 
 	// walk through current directory
 	w := os.walker_create(cwd)
 	defer os.walker_destroy(&w)
+	count := 0
 	for walk in os.walker_walk(&w) {
-		defer free_all(context.temp_allocator) // this includes what the regex virtual machine allocates
+		//defer free_all(context.temp_allocator) // this includes what the regex virtual machine allocates
+		defer count += 1
+		if count == 40 {
+			break
+		}
 
 		// only search for regular files
 		if walk.type != .Regular {
 			continue
 		}
 
-		f, c := match_file(
-			fpat,
-			epat,
-			cpat,
-			&fcapture,
-			&ecapture,
-			&ccapture,
-			&builder,
-			do_ematch,
-			do_cmatch,
-			args.quiet,
-			walk,
-			cwd,
-		)
-		fcounter += f
-		ccounter += c
-
+		a, _ := os.file_info_clone(walk, context.temp_allocator)
+		success := chan.send(send_chan, a)
+		if !success {
+			fmt.println("[PRODUCER] Failed to send, channel may be closed.")
+			return
+		}
 	}
-	strings.builder_destroy(&builder)
+
+	chan.close(send_chan)
+	thread.pool_finish(&pool)
 
 	fmt.printfln("%v file hits", fcounter)
-	if do_cmatch {
+	if task_data.cpattern != "" {
 		fmt.printfln("%v content hits", ccounter)
 	}
+
+	free_all(context.temp_allocator)
 }
