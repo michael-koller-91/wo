@@ -18,7 +18,7 @@ VERSION :: "0.0.3"
 // 0.0.2: colors for file path and line number
 // 0.0.3: color for content matches
 
-NUM_THREADS :: 1
+NUM_THREADS :: 8
 
 BLUE :: ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR
 GREEN :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
@@ -133,35 +133,6 @@ file_matcher :: proc(task: thread.Task) {
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
-
-		track_allocator: mem.Tracking_Allocator
-		mem.tracking_allocator_init(&track_allocator, context.allocator)
-		context.allocator = mem.tracking_allocator(&track_allocator)
-
-		defer {
-			if len(track_allocator.allocation_map) > 0 {
-				fmt.eprintf(
-					"[TASK(%v)] === %v context.allocator allocations not freed: ===\n",
-					task.user_index,
-					len(track_allocator.allocation_map),
-				)
-				for _, entry in track_allocator.allocation_map {
-					fmt.eprintf(
-						"(%v) - %v bytes @ %v\n",
-						task.user_index,
-						entry.size,
-						entry.location,
-					)
-				}
-			} else {
-				fmt.printfln(
-					"[TASK(%v)] context.allocator tracking was active (no missed frees)",
-					task.user_index,
-				)
-			}
-			mem.tracking_allocator_destroy(&track_allocator)
-		}
-
 	}
 
 	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] starting", task.user_index)}
@@ -226,6 +197,7 @@ file_matcher :: proc(task: thread.Task) {
 	chan_rec := task_data^.chan
 	for {
 		walk, ok := chan.recv(chan_rec)
+		defer os.file_info_delete(walk, context.allocator)
 		defer free_all(context.temp_allocator)
 		if !ok {
 			break // More idiomatic than return here
@@ -489,15 +461,8 @@ main :: proc() {
 		cwd      = cwd,
 	}
 
-	arenas: [NUM_THREADS]mem.Dynamic_Arena
-	allocators: [NUM_THREADS]mem.Allocator
 	for i in 0 ..< NUM_THREADS {
-		mem.dynamic_arena_init(&arenas[i], alignment = 64) // alignment is here due to a bug: https://github.com/odin-lang/Odin/issues/4195
-		allocators[i] = mem.dynamic_arena_allocator(&arenas[i])
-		thread.pool_add_task(&pool, allocators[i], file_matcher, &task_data, i)
-	}
-	defer for i in 0 ..< NUM_THREADS {
-		mem.dynamic_arena_destroy(&arenas[i])
+		thread.pool_add_task(&pool, context.allocator, file_matcher, &task_data, i)
 	}
 
 	send_chan := chan.as_send(c)
@@ -506,21 +471,20 @@ main :: proc() {
 	// walk through current directory
 	w := os.walker_create(cwd)
 	defer os.walker_destroy(&w)
-	count := 0
+	//count := 0
 	for walk in os.walker_walk(&w) {
-		//defer free_all(context.temp_allocator) // this includes what the regex virtual machine allocates
-		defer count += 1
-		if count == 40 {
-			break
-		}
+		//defer count += 1
+		//if count == 40 {
+		//	break
+		//}
 
 		// only search for regular files
 		if walk.type != .Regular {
 			continue
 		}
 
-		a, _ := os.file_info_clone(walk, context.temp_allocator)
-		success := chan.send(send_chan, a)
+		walk_copy, _ := os.file_info_clone(walk, context.allocator)
+		success := chan.send(send_chan, walk_copy)
 		if !success {
 			fmt.println("[PRODUCER] Failed to send, channel may be closed.")
 			return
