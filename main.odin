@@ -13,11 +13,12 @@ import "core:terminal/ansi"
 import "core:text/regex"
 import "core:thread"
 
-VERSION :: "0.0.4"
+VERSION :: "0.1.0"
 // changelog
 // 0.0.2: colors for file path and line number
 // 0.0.3: color for content matches
 // 0.0.4: multiple threads
+// 0.1.0: content pattern is an optional positional argument
 
 NUM_THREADS :: 7
 
@@ -318,7 +319,7 @@ main :: proc() {
 	Args :: struct {
 		filename_pattern: string `args:"pos=0,required" usage:"Filename pattern. Find every file whose name matches this pattern."`,
 		exclude_pattern:  string `args:"name=e" usage:"Exclude pattern. Exclude every file whose path matches this pattern."`,
-		content_pattern:  string `args:"name=c" usage:"Content pattern. Within every found file, find every line which matches this pattern."`,
+		content_pattern:  string `args:"pos=1,name=c" usage:"Content pattern. Within every found file, find every line which matches this pattern."`,
 		quiet:            bool `args:"name=q" usage:"Quiet mode. Don't print matches, only print the hit count."`,
 		version:          bool `args:"name=v" usage:"Print the verison number and exit."`,
 	}
@@ -461,9 +462,11 @@ main :: proc() {
 		ccounter += task_data[i].ccounter
 	}
 
-	fmt.printfln("%v file hits", fcounter)
+	fmt.printf("%v file hits.", fcounter)
 	if args.content_pattern != "" {
-		fmt.printfln("%v content hits", ccounter)
+		fmt.printfln(" %v content hits.", ccounter)
+	} else {
+		fmt.println()
 	}
 
 	free_all(context.temp_allocator)
