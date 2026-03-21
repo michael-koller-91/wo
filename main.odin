@@ -13,12 +13,13 @@ import "core:terminal/ansi"
 import "core:text/regex"
 import "core:thread"
 
-VERSION :: "0.0.3"
+VERSION :: "0.0.4"
 // changelog
 // 0.0.2: colors for file path and line number
 // 0.0.3: color for content matches
+// 0.0.4: multiple threads
 
-NUM_THREADS :: 8
+NUM_THREADS :: 7
 
 BLUE :: ansi.CSI + ansi.FG_BRIGHT_BLUE + ansi.SGR
 GREEN :: ansi.CSI + ansi.FG_BRIGHT_GREEN + ansi.SGR
@@ -26,12 +27,10 @@ RED :: ansi.CSI + ansi.FG_BRIGHT_RED + ansi.SGR
 RESET :: ansi.CSI + ansi.RESET + ansi.SGR
 
 Task_Data :: struct {
-	chan:     chan.Chan(os.File_Info),
+	chan:     chan.Chan(string),
 	quiet:    bool,
-	fpattern: string,
-	epattern: string,
 	cpattern: string,
-	cwd:      string,
+	ccounter: int,
 }
 
 write_examples :: proc() {
@@ -138,34 +137,6 @@ file_matcher :: proc(task: thread.Task) {
 	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] starting", task.user_index)}
 	task_data := cast(^Task_Data)task.data
 
-	fpat, fpat_err := regex.create(task_data.fpattern, {.No_Capture})
-	defer regex.destroy_regex(fpat)
-	if fpat_err != nil {
-		if task.user_index == 0 {
-			fmt.eprintfln(
-				"ERROR: Failed to create regular expression from filename pattern \"%v\": %v. Maybe escaping is missing?",
-				task_data.fpattern,
-				fpat_err,
-			)
-		}
-		os.exit(1)
-	}
-
-	do_ematch := task_data.epattern != ""
-	epat, epat_err := regex.create(task_data.epattern, {.No_Capture})
-	defer regex.destroy_regex(epat)
-	if epat_err != nil {
-		if task.user_index == 0 {
-			fmt.eprintfln(
-				"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v. Maybe escaping is missing?",
-				task_data.epattern,
-				epat_err,
-			)
-		}
-		os.exit(1)
-	}
-
-	do_cmatch := task_data.cpattern != ""
 	cpat, cpat_err := regex.create(task_data.cpattern)
 	defer regex.destroy_regex(cpat)
 	if cpat_err != nil {
@@ -179,136 +150,74 @@ file_matcher :: proc(task: thread.Task) {
 		os.exit(1)
 	}
 
-	ecapture := regex.preallocate_capture()
-	defer regex.destroy_capture(ecapture)
-
-	fcapture := regex.preallocate_capture()
-	defer regex.destroy_capture(fcapture)
-
 	ccapture := regex.preallocate_capture()
 	defer regex.destroy_capture(ccapture)
 
 	builder := strings.builder_make()
 	defer strings.builder_destroy(&builder)
 
-	fcounter := 0 // count file hits
 	ccounter := 0 // count content hits
-
 	chan_rec := task_data^.chan
+
 	for {
-		walk, ok := chan.recv(chan_rec)
-		defer os.file_info_delete(walk, context.allocator)
+		filepath, ok := chan.recv(chan_rec)
+		defer delete(filepath)
 		defer free_all(context.temp_allocator)
 		if !ok {
-			break // More idiomatic than return here
+			task_data^.ccounter = ccounter
+			break
 		}
-		f, c := match_file(
-			&fpat,
-			&epat,
-			&cpat,
-			&fcapture,
-			&ecapture,
-			&ccapture,
-			&builder,
-			do_ematch,
-			do_cmatch,
-			task_data.quiet,
-			walk.name,
-			walk.fullpath,
-			task_data.cwd,
-		)
-		fcounter += f
-		ccounter += c
+		ccounter += match_file(&cpat, &ccapture, &builder, task_data.quiet, filepath)
 	}
 	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] channel closed, stopping", task.user_index)}
 }
 
 match_file :: proc(
-	fpat, epat, cpat: ^regex.Regular_Expression,
-	fcapture, ecapture, ccapture: ^regex.Capture,
+	cpat: ^regex.Regular_Expression,
+	ccapture: ^regex.Capture,
 	builder: ^strings.Builder,
-	do_ematch, do_cmatch: bool,
 	quiet: bool,
-	walk_name: string,
-	walk_fullpath: string,
-	cwd: string,
+	filepath: string,
 ) -> (
-	fcounter, ccounter: int,
+	ccounter: int,
 ) {
-	fcounter = 0
 	ccounter = 0
-
-	// exclude files not matching the file pattern
-	_, fmatch := regex.match(fpat^, walk_name, fcapture)
-	if !fmatch {
-		return
-	}
-
-	// split into relative path
-	filepath, filepath_ok := os.get_relative_path(cwd, walk_fullpath, context.allocator)
-	defer delete(filepath)
-	if filepath_ok != os.ERROR_NONE {
-		fmt.eprintfln(
-			"ERROR: Could not determine the relative file path for %v. %v",
-			walk_fullpath,
-			filepath_ok,
-		)
-		return
-	}
-
-	// exclude files matching the exclude pattern
-	if do_ematch {
-		_, ematch := regex.match(epat^, filepath, ecapture)
-		if ematch {
-			return
-		}
-	}
 
 	strings.builder_reset(builder)
 	filepath_color := fmt.aprintf("%v%v%v", BLUE, filepath, RESET)
 	defer delete(filepath_color)
 
-	fcounter = 1
-	if do_cmatch {
-		// get content of files
-		file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
-		defer delete(file_read)
-		if file_read_ok != os.ERROR_NONE {
-			fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
-			return
-		}
+	// get content of files
+	file_read, file_read_ok := os.read_entire_file(filepath, context.allocator)
+	defer delete(file_read)
+	if file_read_ok != os.ERROR_NONE {
+		fmt.eprintfln("ERROR: Could not open file %v. %v", filepath, file_read_ok)
+		return
+	}
 
-		it := string(file_read)
-		linenr := 0
-		had_match := false
-		// search through file and print content matches
-		for str in strings.split_lines_after_iterator(&it) {
-			linenr += 1
-			cnumgrps, cmatch := regex.match(cpat^, str, ccapture)
-			if cmatch {
-				had_match = true
-				ccounter += 1
-				strings.write_string(
-					builder,
-					fmt.aprintf(
-						"%v:%v%v%v:",
-						filepath_color,
-						GREEN,
-						linenr,
-						RESET,
-						allocator = context.temp_allocator,
-					),
-				)
-				highlight(
-					builder,
-					str,
-					ccapture^.pos[:cnumgrps],
+	it := string(file_read)
+	linenr := 0
+	had_match := false
+	// search through file and print content matches
+	for str in strings.split_lines_after_iterator(&it) {
+		linenr += 1
+		cnumgrps, cmatch := regex.match(cpat^, str, ccapture)
+		if cmatch {
+			had_match = true
+			ccounter += 1
+			strings.write_string(
+				builder,
+				fmt.aprintf(
+					"%v:%v%v%v:",
+					filepath_color,
+					GREEN,
+					linenr,
+					RESET,
 					allocator = context.temp_allocator,
-				)
-			}
+				),
+			)
+			highlight(builder, str, ccapture^.pos[:cnumgrps], allocator = context.temp_allocator)
 		}
-	} else {
-		strings.write_string(builder, filepath)
 	}
 
 	if !quiet {
@@ -437,14 +346,41 @@ main :: proc() {
 	if cwd_ok != os.ERROR_NONE {
 		fmt.eprintfln("ERROR: Could not determine the current working directory. %v", cwd_ok)
 	}
-	if !args.quiet {
-		fmt.printfln("Searching through %v\n", cwd)
+
+	fpat, fpat_err := regex.create(args.filename_pattern, {.No_Capture})
+	defer regex.destroy_regex(fpat)
+	if fpat_err != nil {
+		fmt.eprintfln(
+			"ERROR: Failed to create regular expression from filename pattern \"%v\": %v. Maybe escaping is missing?",
+			args.filename_pattern,
+			fpat_err,
+		)
+		os.exit(1)
 	}
 
-	fcounter := 0 // count file hits
-	ccounter := 0 // count content hits
+	do_ematch := args.exclude_pattern != ""
+	epat, epat_err := regex.create(args.exclude_pattern, {.No_Capture})
+	defer regex.destroy_regex(epat)
+	if epat_err != nil {
+		fmt.eprintfln(
+			"ERROR: Failed to create regular expression from exclude pattern \"%v\": %v. Maybe escaping is missing?",
+			args.exclude_pattern,
+			epat_err,
+		)
+		os.exit(1)
+	}
 
-	c, err := chan.create(chan.Chan(os.File_Info), context.allocator)
+	do_cmatch := args.content_pattern != ""
+
+	ecapture := regex.preallocate_capture()
+	defer regex.destroy_capture(ecapture)
+
+	fcapture := regex.preallocate_capture()
+	defer regex.destroy_capture(fcapture)
+
+	fcounter := 0 // count file hits
+
+	c, err := chan.create(chan.Chan(string), context.allocator)
 	assert(err == .None)
 	defer chan.destroy(c)
 
@@ -452,17 +388,15 @@ main :: proc() {
 	thread.pool_init(&pool, context.allocator, NUM_THREADS)
 	defer thread.pool_destroy(&pool)
 
-	task_data: Task_Data = {
-		chan     = c,
-		quiet    = args.quiet,
-		cpattern = args.content_pattern,
-		epattern = args.exclude_pattern,
-		fpattern = args.filename_pattern,
-		cwd      = cwd,
-	}
-
+	task_data: [NUM_THREADS]Task_Data
 	for i in 0 ..< NUM_THREADS {
-		thread.pool_add_task(&pool, context.allocator, file_matcher, &task_data, i)
+		task_data[i] = {
+			chan     = c,
+			quiet    = args.quiet,
+			cpattern = args.content_pattern,
+			ccounter = 0,
+		}
+		thread.pool_add_task(&pool, context.allocator, file_matcher, &task_data[i], i)
 	}
 
 	send_chan := chan.as_send(c)
@@ -471,31 +405,64 @@ main :: proc() {
 	// walk through current directory
 	w := os.walker_create(cwd)
 	defer os.walker_destroy(&w)
-	//count := 0
 	for walk in os.walker_walk(&w) {
-		//defer count += 1
-		//if count == 40 {
-		//	break
-		//}
-
 		// only search for regular files
 		if walk.type != .Regular {
 			continue
 		}
 
-		walk_copy, _ := os.file_info_clone(walk, context.allocator)
-		success := chan.send(send_chan, walk_copy)
-		if !success {
-			fmt.println("[PRODUCER] Failed to send, channel may be closed.")
-			return
+		// exclude files not matching the file pattern
+		_, fmatch := regex.match(fpat, walk.name, &fcapture)
+		if !fmatch {
+			continue
+		}
+
+		// split into relative path
+		filepath, filepath_ok := os.get_relative_path(cwd, walk.fullpath, context.allocator)
+		if filepath_ok != os.ERROR_NONE {
+			fmt.eprintfln(
+				"ERROR: Could not determine the relative file path for %v. %v",
+				walk.fullpath,
+				filepath_ok,
+			)
+			continue
+		}
+
+		// exclude files matching the exclude pattern
+		if do_ematch {
+			_, ematch := regex.match(epat, filepath, &ecapture)
+			if ematch {
+				continue
+			}
+		}
+
+		fcounter += 1
+
+		if do_cmatch {
+			success := chan.send(send_chan, filepath)
+			if !success {
+				fmt.println("ERROR: Failed to send.")
+				os.exit(1)
+			}
+
+		} else {
+			if !args.quiet {
+				fmt.println(filepath)
+			}
+			delete(filepath)
 		}
 	}
 
 	chan.close(send_chan)
 	thread.pool_finish(&pool)
 
+	ccounter := 0 // count content hits
+	for i in 0 ..< NUM_THREADS {
+		ccounter += task_data[i].ccounter
+	}
+
 	fmt.printfln("%v file hits", fcounter)
-	if task_data.cpattern != "" {
+	if args.content_pattern != "" {
 		fmt.printfln("%v content hits", ccounter)
 	}
 
