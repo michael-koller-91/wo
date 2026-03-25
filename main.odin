@@ -13,12 +13,14 @@ import "core:terminal/ansi"
 import "core:text/regex"
 import "core:thread"
 
-VERSION :: "0.1.0"
+VERSION :: "0.2.0"
 // changelog
+// 0.0.1: first stable version
 // 0.0.2: colors for file path and line number
 // 0.0.3: color for content matches
 // 0.0.4: multiple threads
 // 0.1.0: content pattern is an optional positional argument
+// 0.2.0: add flag -i for case-insensitive content search
 
 NUM_THREADS :: 7
 
@@ -29,6 +31,7 @@ RESET :: ansi.CSI + ansi.RESET + ansi.SGR
 
 Task_Data :: struct {
 	chan:     chan.Chan(string),
+	cflags:   regex.Flags,
 	quiet:    bool,
 	cpattern: string,
 	ccounter: int,
@@ -138,7 +141,7 @@ file_matcher :: proc(task: thread.Task) {
 	when ODIN_DEBUG {fmt.printfln("[TASK(%v)] starting", task.user_index)}
 	task_data := cast(^Task_Data)task.data
 
-	cpat, cpat_err := regex.create(task_data.cpattern)
+	cpat, cpat_err := regex.create(task_data.cpattern, task_data.cflags)
 	defer regex.destroy_regex(cpat)
 	if cpat_err != nil {
 		if task.user_index == 0 {
@@ -320,6 +323,7 @@ main :: proc() {
 		filename_pattern: string `args:"pos=0,required" usage:"Filename pattern. Find every file whose name matches this pattern."`,
 		exclude_pattern:  string `args:"name=e" usage:"Exclude pattern. Exclude every file whose path matches this pattern."`,
 		content_pattern:  string `args:"pos=1,name=c" usage:"Content pattern. Within every found file, find every line which matches this pattern."`,
+		case_insensitive: bool `args:"name=i" usage:"Content search is case insensitive."`,
 		quiet:            bool `args:"name=q" usage:"Quiet mode. Don't print matches, only print the hit count."`,
 		version:          bool `args:"name=v" usage:"Print the verison number and exit."`,
 	}
@@ -340,6 +344,11 @@ main :: proc() {
 		flags.write_usage(os.to_stream(os.stdout), Args, os.args[0])
 		write_examples()
 		os.exit(0)
+	}
+
+	cflags: regex.Flags
+	if args.case_insensitive {
+		cflags += {.Case_Insensitive}
 	}
 
 	cwd, cwd_ok := os.get_working_directory(context.allocator)
@@ -393,6 +402,7 @@ main :: proc() {
 	for i in 0 ..< NUM_THREADS {
 		task_data[i] = {
 			chan     = c,
+			cflags   = cflags,
 			quiet    = args.quiet,
 			cpattern = args.content_pattern,
 			ccounter = 0,

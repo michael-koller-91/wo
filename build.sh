@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-cmd="odin build . -o:speed -show-timings"
-echo "$cmd"
-eval "$cmd"
+set -x
+odin build . -o:speed -show-timings
+set +x
