@@ -331,9 +331,8 @@ main :: proc() {
 	parse_err := flags.parse(&args, os.args[1:])
 	switch e in parse_err {
 	case flags.Validation_Error:
-		flags.write_usage(os.to_stream(os.stdout), Args, os.args[0])
-		write_examples()
-		fmt.eprintfln("\n[%T] %s", e, e.message)
+		fmt.eprintfln("[%T] %s", e, e.message)
+		fmt.println("Try 'wo -help' for more information.")
 		os.exit(1)
 	case flags.Parse_Error:
 		fmt.eprintfln("[%T.%v] %s", e, e.reason, e.message)
